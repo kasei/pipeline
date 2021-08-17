@@ -318,7 +318,6 @@ class AddGroupURI(Configurable):
 	def __call__(self, data:dict):
 		# TODO: move this into MakeLinkedArtOrganization
 		auth_name = data.get('authority')
-		print(f'GROUP DATA: {pprint.pformat(data)}')
 		if auth_name and '[' not in auth_name:
 			data['uri'] = self.helper.make_shared_uri('GROUP', 'AUTHNAME', auth_name)
 			data['identifiers'] = [
@@ -452,11 +451,18 @@ class AddRow(Configurable):
 class AddArtists(Configurable):
 	helper = Option(required=True)
 	make_la_person = Service('make_la_person')
+	attribution_modifiers = Service('attribution_modifiers')
 
-	def __call__(self, data:dict, *, make_la_person):
+	def modifiers(self, a:dict):
+		mod = a.get('attrib_mod_auth', '')
+		mods = CaseFoldingSet({m.strip() for m in mod.split(';')} - {''})
+		return mods
+
+	def __call__(self, data:dict, *, make_la_person, attribution_modifiers):
 		'''Add modeling for artists as people involved in the production of an object'''
 		hmo = get_crom_object(data['_object'])
 		sales_record = get_crom_object(data['_text_row'])
+		ATTRIBUTED_TO = attribution_modifiers['attributed to']
 
 		try:
 			hmo_label = f'{hmo._label}'
@@ -467,23 +473,37 @@ class AddArtists(Configurable):
 		# reconciled during prev/post sale rewriting, this will allow us to also reconcile
 		# the URIs for the production events (of which there should only be one per object)
 		event_uri = hmo.id + '-Production'
-		event = model.Production(ident=event_uri, label=f'Production event for {hmo_label}')
-		hmo.produced_by = event
+		prod_event = model.Production(ident=event_uri, label=f'Production event for {hmo_label}')
+		hmo.produced_by = prod_event
 
 		artists = data.get('_artists', [])
 
 		pi = self.helper.person_identity
 
+		for a in artists:
+			a['modifiers'] = self.modifiers(a)
+
 		for seq_no, a in enumerate(artists):
-			artist_label = a.get('role_label')
+			mods = a['modifiers']
+			attribute_assignment_id = self.helper.prepend_uri_key(prod_event.id, f'ASSIGNMENT,Artist-{seq_no}')
+			name = a.get('auth_name', a.get('name', '(anonymous)'))
+			artist_label = a.get('role_label') or name
 			person = get_crom_object(a)
 			person.referred_to_by = sales_record
 
+			attrib_assignment_classes = [model.AttributeAssignment]
 			subprod_path = self.helper.make_uri_path(*a["uri_keys"])
 			subevent_uri = event_uri + f'-{subprod_path}'
 			subevent = model.Production(ident=subevent_uri, label=f'Production sub-event for {artist_label}')
 			subevent.carried_out_by = person
-			event.part = subevent
+			if ATTRIBUTED_TO.intersects(mods):
+				attrib_assignment_classes.append(vocab.PossibleAssignment)
+				assignment = vocab.make_multitype_obj(*attrib_assignment_classes, ident=attribute_assignment_id, label=f'Possibly attributed to {artist_label}')
+				prod_event.attributed_by = assignment
+				assignment.assigned_property = 'part'
+				assignment.assigned = subevent
+			else:
+				prod_event.part = subevent
 # 		data['_artists'] = [a for a in artists]
 		return data
 
@@ -1332,6 +1352,11 @@ class KnoedlerPipeline(PipelineBase):
 		different_objects = services.get('objects_different', {}).get('knoedler_numbers', [])
 		services['different_objects'] = different_objects
 
+		# make these case-insensitive by wrapping the value lists in CaseFoldingSet
+		for name in ('attribution_modifiers',):
+			if name in services:
+				services[name] = {k: CaseFoldingSet(v) for k, v in services[name].items()}
+
 		services.update({
 			# to avoid constructing new MakeLinkedArtPerson objects millions of times, this
 			# is passed around as a service to the functions and classes that require it.
@@ -1372,7 +1397,7 @@ class KnoedlerPipeline(PipelineBase):
 									"artist_authority": 'auth_name',
 									"artist_nationality": 'nationality',
 									"artist_attribution_mod": 'attribution_mod',
-									"artist_attribution_mod_auth": 'attribution_mod_auth',
+									"artist_attribution_mod_auth": 'attrib_mod_auth',
 								},
 								'postprocess': [
 									filter_empty_person,
