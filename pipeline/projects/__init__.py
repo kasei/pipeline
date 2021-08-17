@@ -378,6 +378,8 @@ class PersonIdentity:
 
 		role_label = None
 		if self.acceptable_person_auth_name(auth_name):
+			if auth_name is None:
+				warnings.warn(f'*** No auth name while assigning role labels: {data}')
 			if role:
 				role_label = f'{role} “{auth_name}”'
 			data['label'] = auth_name
@@ -398,6 +400,8 @@ class PersonIdentity:
 			names += [n.strip() for n in variant_names.split(';')]
 
 		for name in names:
+			if name is None:
+				warnings.warn(f'*** No name while assigning role labels: {data}')
 			if role and not role_label:
 				role_label = f'{role} “{name}”'
 			name_kwargs = {}
@@ -413,6 +417,8 @@ class PersonIdentity:
 			role_label = f'anonymous {role}'
 
 		if role:
+			if role_label is None or 'None' in role_label:
+				warnings.warn(f'*** No role label from record: {data}')
 			data['role_label'] = role_label
 
 class StaticInstanceHolder:
